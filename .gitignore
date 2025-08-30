@@ -1,0 +1,8 @@
+
+bin/
+build/
+example/bin
+.vscode/
+
+.DS_Store
+**.DS_Store
