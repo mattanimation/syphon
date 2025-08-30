@@ -1,5 +1,6 @@
-# SYstem SiPHON
+# SYstem siPHON
 
+Syphon
 A simple system info gatherer
 
 **NOTE: this is very much a WIP**
@@ -38,34 +39,29 @@ this means it's not looking for the relative location, becuase it tells the comp
 ---
 
 ## SETUP
-- `./scripts/setup.sh`
+Run this before running the other make commands
+- `./scripts/setup.sh` - creates the build and bin dirs
 
 ---
 
 ## BUILD
 
-### MAC
-- `make compile_lib_mac` - compile the lib
-- `make create_lib_shared_mac` - turn the compiled lib into a shared lib
-- `make build_example_shared_mac` - build the example using shared lib
-- `make create_static_mac` - build the static lib
-- `make compile_example_static_mac` - build the example static
-- `make link_example_static_mac` - link the static lib with the example
-
-### LINUX
-- `make compile_lib_linux` - compile the lib
-- `make create_lib_shared_linux` - turn the compiled lib into a shared lib
-- `make build_shared_linux` - build the shared lib
-- `make build_example_shared_linux` - build the example using shared lib
-- `make create_lib_static_linux` - create the static lib
-- `make build_example_static_linux` - build the example static
-- `make link_example_static_linux` - link the static lib with the example
+make commands
+- `make all` - all the things
+- `make lib_shared` - turn the compiled lib into a shared lib
+- `make example_shared` - build the example using shared lib
+- `make lib_static` - build the static lib
+- `make example_static` - build the example
 
 ---
 
 ## RUN
-- `make run`
+- `make run_shared` - run the example that uses the shared lib
+- `make run_static` - run the example that uses the static lib
 
+## CLEAN
+- `make clean` - clean up
+- `make clean_all` - clean all
 ---
 
 ## Goals
@@ -75,7 +71,7 @@ some of the goals for this project were:
 - [ ] open source something to use in my own projects
 - [ ] make something that is "cross platform"
     - [x] works on mac
-    - [ ] works on linux 
+    - [x] works on linux 
 - [x] practice systems level programming
 - [x] learn how to get system info
     - [x] mac
