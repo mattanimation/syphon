@@ -16,14 +16,14 @@
 /**
  * // Create a dynamic array for ints, start with capacity 4
     DynArray *vec = da_alloc(sizeof(int), 4);
-    if (!vec) { perror("alloc"); return 1; }
+    if (!vec) { perror("alloc"); return; }
 
     // Push some numbers 
     for (int i = 0; i < 10; ++i) {
         if (!da_push(vec, &i)) {
             fprintf(stderr, "push failed at %d\n", i);
             da_free(vec);
-            return 1;
+            return;
         }
     }
 
@@ -523,7 +523,9 @@ void syphon_info_get(syphon_info_t *info) {
 
 #include <string.h>
 #include <unistd.h>
-
+#include <dirent.h>
+#include <limits.h> // NAME_MAX
+#include <ctype.h> // for is_digit
 
 typedef struct {
     u64 user, nice, system, idle, iowait, irq, softirq, steal;
@@ -600,7 +602,7 @@ void list_swaps(void) {
  * @param FILE the file pointer
  * @param key the name of the info in the file we want
  */
-static u64 get_mem_by_key(FILE *fp, const char *key) {
+static u64 get_mem_by_key(const char *key, FILE *fp) {
     char line[128];
     u64 value = 0;
     while (fgets(line, sizeof(line), fp)) {
@@ -609,6 +611,7 @@ static u64 get_mem_by_key(FILE *fp, const char *key) {
             break;
         }
     }
+    return value;
 }
 
 u64 kibs_to_bytes(const u64 value) {
@@ -670,42 +673,97 @@ void get_mem_stats(syphon_info_t *info) {
 
 }
 
-void get_cpu_stats(syphon_info_t *info) {
-    FILE *fp;
-    char line[256];
-    CpuStat *prev = NULL;
-    size_t coreCount = 0;
+/* -------------------------------------------------------------
+ * Helper that grows a dynamic array safely
+ * ------------------------------------------------------------- */
+static b8 grow_array(CpuStat **buf, size_t *cap, size_t needed)
+{
+    if (needed <= *cap) return TRUE;          /* already big enough */
 
-    while (1) {
-        fp = fopen("/proc/stat", "r");
-        if (!fp) { perror("fopen"); return 1; }
+    size_t new_cap = (*cap == 0) ? 1 : *cap;
+    while (new_cap < needed) new_cap *= 2;    /* geometric growth */
 
-        size_t idx = 0;
-        while (fgets(line, sizeof(line), fp)) {
-            if (strncmp(line, "cpu", 3) != 0) break;   // stop after cpu lines
-            if (idx == 0) { /* skip the aggregate "cpu " line */ idx++; continue; }
-
-            if (prev == NULL) {
-                /* allocate on first pass */
-                prev = calloc(1, sizeof(CpuStat));
-                coreCount = 1;
-            } else {
-                prev = realloc(prev, ++coreCount * sizeof(CpuStat));
-            }
-            CpuStat cur;
-            if (parse_cpu_line(line, &cur) == 0) {
-                if (coreCount > 1) {
-                    double busy = calc_busy(&prev[coreCount-2], &cur);
-                    printf("Core %zu: %.1f%% busy\n", coreCount-2, busy);
-                }
-                prev[coreCount-2] = cur;
-            }
-        }
-        fclose(fp);
-        sleep(1);   // interval – adjust as you wish
+    CpuStat *tmp = realloc(*buf, new_cap * sizeof(**buf));
+    if (!tmp) {
+        perror("realloc");
+        return FALSE;                         /* caller keeps old buffer */
     }
+    *buf = tmp;
+    *cap = new_cap;
+    return TRUE;
+}
+
+void get_cpu_stats(syphon_info_t *info) {
+     FILE *fp = NULL;
+    char line[256];
+    CpuStat *prev = NULL;          /* previous snapshot */
+    size_t prev_cnt = 0;           /* how many entries are valid in prev */
+    size_t capacity = 0;           /* allocated slots in prev */
+
+    while (TRUE) {
+        fp = fopen("/proc/stat", "r");
+        if (!fp) { perror("fopen"); break; }
+
+        size_t core_idx = 0;       /* 0 = first *core* line (skip aggregate) */
+
+        while (fgets(line, sizeof(line), fp)) {
+            if (strncmp(line, "cpu", 3) != 0) break;   /* stop after cpu lines */
+
+            /* Skip the aggregate line "cpu  ..." */
+            if (core_idx == 0) { ++core_idx; continue; }
+
+            CpuStat cur;
+            if (parse_cpu_line(line, &cur) != 0) continue;  /* malformed line */
+
+            /* Ensure we have room for the new core */
+            if (!grow_array(&prev, &capacity, core_idx))
+                goto cleanup;   /* unrecoverable allocation failure */
+
+            /* If we already have a previous sample for this core, compute usage */
+            if (core_idx <= prev_cnt) {
+                f64 busy = calc_busy(&prev[core_idx-1], &cur);
+                printf("Core %zu: %.1f%% busy\n", core_idx-1, busy);
+                
+                if(info->cores_info->length >= prev_cnt){
+                    // set the values
+                    syp_core_info_t *ci = (syp_core_info_t *)da_at(info->cores_info, core_idx-1);
+                    if(ci){
+                        ci->free = 100.0 - busy;
+                        ci->index = core_idx-1;
+                        ci->used = busy;
+                    }
+                } else {
+                    syp_core_info_t ci = {
+                        .free=100.0 - busy,
+                        .index=core_idx-1,
+                        .used=busy
+                    };
+                    //push the values
+                    if (!da_push(info->cores_info, &ci)) {
+                        fprintf(stderr, "push failed at %zu\n", core_idx-1);
+                        da_free(info->cores_info);
+                        return;
+                    }
+                }
+            }
+
+            /* Store the current snapshot for the next iteration */
+            prev[core_idx-1] = cur;
+            ++core_idx;
+        }
+
+        /* Update the count of valid entries (might shrink if fewer cores appear) */
+        prev_cnt = core_idx - 1;   /* subtract the aggregate line */
+
+        fclose(fp);
+        sleep(1);
+    }
+
+cleanup:
     free(prev);
 }
+
+#define COMM_PATH_MAX  (sizeof("/proc/") + NAME_MAX + sizeof("/comm"))
 
 void get_proc_stats(syphon_info_t *info) {
 
@@ -718,16 +776,18 @@ void get_proc_stats(syphon_info_t *info) {
     DIR *proc = opendir("/proc");
     if (!proc) {
         perror("opendir /proc");
-        return 1;
+        return;
     }
 
     struct dirent *entry;
-    printf("PID   Name\n");
+    //printf("PID   Name\n");
+    
+    u32 i = 0;
     while ((entry = readdir(proc)) != NULL) {
         if (!isdigit(entry->d_name[0]))
             continue;               // skip non‑numeric entries
 
-        char commPath[256];
+        char commPath[512];
         snprintf(commPath, sizeof(commPath),
                  "/proc/%s/comm", entry->d_name);
 
@@ -742,7 +802,7 @@ void get_proc_stats(syphon_info_t *info) {
         name[strcspn(name, "\n")] = '\0';
 
         //printf("%5s  %s\n", entry->d_name, name);
-        if(info->cores_info->length >= count){
+        if(info->cores_info->length >= info->proc_count){
             // set the values
             syp_proc_info_t *pi = (syp_proc_info_t *)da_at(info->procs_info, i);
             if(pi){
@@ -758,20 +818,21 @@ void get_proc_stats(syphon_info_t *info) {
             };
             //push the values
             if (!da_push(info->procs_info, &pi)) {
-                fprintf(stderr, "push failed at %zu\n", i);
+                fprintf(stderr, "push failed at %u\n", i);
                 da_free(info->procs_info);
                 return;
             }
         }
-        
-        
+
+        i++;
     }
+    info->proc_count = i;
     closedir(proc);
 }
 
 void get_network_stats(syphon_info_t *info) {
     FILE *fp = fopen("/proc/net/dev", "r");
-    if (!fp) { perror("fopen"); return 1; }
+    if (!fp) { perror("fopen"); return; }
 
     char line[256];
     /* Skip the two header lines */
@@ -812,6 +873,9 @@ void syphon_info_get(syphon_info_t *info) {
     // ---------- CPU ----------
     get_cpu_stats(info);
 
+    // ---------- PROCS ---------
+    //get_proc_stats(info);
+
     // ---------- NETWORK ----------
     get_network_stats(info);
 
@@ -819,9 +883,9 @@ void syphon_info_get(syphon_info_t *info) {
     get_mem_stats(info);
 
     // ---------- DISK INFO ----------
-    get_fs_stats("/", &info);
+    get_fs_stats("/", info);
     //get_fs_stats("/home");
-    list_swaps();
+    //list_swaps();
     // ---------- DEVICES ----------
     get_device_stats(info);
 
